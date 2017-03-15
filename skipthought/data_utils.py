@@ -138,7 +138,7 @@ class Vocab:
 
 class TextData:
     def __init__(self, fname, line_process_fn=lambda x: x.strip(),
-                 max_vocab_size=100000, max_len=100, verbose=10000):
+                 max_vocab_size=100000, max_len=100, verbose=10000, vocab=None):
         """Class for reading text data and making batches.
 
         Args:
@@ -157,11 +157,14 @@ class TextData:
 
         self._check_args()
 
-        self.vocab = None
-        self.dataset = None
-        self.total_lines = None
+        if vocab is None:
+            self.vocab = None
+            self.total_lines = None
+            self._build_vocabulary_and_stats()
+        else:
+            self.vocab = vocab
 
-        self._build_vocabulary_and_stats()
+        self.dataset = None
         self._build_dataset()
 
     def _check_args(self):
@@ -336,6 +339,43 @@ class TextData:
 
             total_processed_examples += len(curr)
 
+            if total_processed_examples == len(curr_data):
+                break
+        # Sanity check to make sure we iterated over all the dataset as intended
+        assert total_processed_examples == len(curr_data), \
+            'Expected {} and processed {}'.format(len(curr_data),
+                                                  total_processed_examples)
+
+    def lines_data_iterator(self, curr_data, max_len,
+                              batch_size=64, shuffle=False):
+        """Creates iterator for (current sentence)
+        data. Is is useful for training skip-thought vectors.
+
+        Args:
+            curr_data (list of lists of ints): List with raw lines which corresponds to current sentences.
+                Lines can be with different lengths. They will be encoder inputs.
+            max_len (int): Maximum length for padding previous and next sentences.
+            batch_size (int): Size of batch.
+            shuffle (bool): Whether to shuffle data or not.
+
+        Yields:
+            enc_inp (Batch)
+
+        """
+        if shuffle:
+            indices = np.random.permutation(len(curr_data))
+            curr_data = [curr_data[i] for i in indices]
+
+        total_processed_examples = 0
+        total_steps = int(np.ceil(len(curr_data)) / float(batch_size))
+        for step in range(total_steps+1):
+            batch_start = step * batch_size
+
+            curr = curr_data[batch_start:batch_start + batch_size]
+            enc_inp = self.make_batch(self.encode_lines(curr))
+            yield enc_inp
+
+            total_processed_examples += len(curr)
             if total_processed_examples == len(curr_data):
                 break
         # Sanity check to make sure we iterated over all the dataset as intended

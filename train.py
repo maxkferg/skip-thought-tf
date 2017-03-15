@@ -72,6 +72,8 @@ def main(**kwargs):
     with open(os.path.join(kwargs['save_dir'], 'config.pkl'), 'wb') as f:
         dill.dump(kwargs, f)
     TextData.save(textdata, os.path.join(kwargs['save_dir'], 'textdata.pkl'))
+    # save the vocab in a single file for predict.py
+    TextData.save(textdata.vocab, os.path.join(kwargs['save_dir'], 'vocab.pkl'))
 
     # Make triples.
     logger.info("Making triples")

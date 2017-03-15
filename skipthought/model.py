@@ -11,7 +11,7 @@ class SkipthoughtModel:
     SUPPORTED_CELLTYPES = ['lstm', 'gru']
 
     def __init__(self, cell_type, num_hidden, num_layers, embedding_size, max_vocab_size,
-                 learning_rate, decay_rate, decay_steps, grad_clip, num_samples, max_length_decoder):
+                 learning_rate, decay_rate, decay_steps, grad_clip, num_samples, max_length_decoder, only_encoder=False):
         self.cell_type = cell_type
         self.max_length_decoder = max_length_decoder
         self.grad_clip = grad_clip
@@ -23,6 +23,7 @@ class SkipthoughtModel:
         self.num_hidden = num_hidden
         self.num_layers = num_layers
         self.num_samples = num_samples
+        self.only_encoder = only_encoder
         self._logger = logging.getLogger(__name__)
 
         self._logger.info("Creating SkipthoughModel.")
@@ -52,19 +53,20 @@ class SkipthoughtModel:
             self.encoder_input = tf.placeholder(tf.int32, [None, None], name='encoder_input')
             self.encoder_seq_len = tf.placeholder(tf.int32, [None, ], name='encoder_sequence_lengths')
 
-            self.prev_decoder_input = [tf.placeholder(tf.int32, [None, ], name="prev_decoder_input{0}".format(i))
-                                       for i in range(self.max_length_decoder)]
-            self.prev_decoder_target = [tf.placeholder(tf.int32, [None, ], name="prev_decoder_target{0}".format(i))
-                                        for i in range(self.max_length_decoder)]
-            self.prev_decoder_weights = [tf.placeholder(tf.float32, shape=[None,], name="prev__decoder_weight{0}".format(i))
-                                         for i in range(self.max_length_decoder)]
+            if not self.only_encoder:
+                self.prev_decoder_input = [tf.placeholder(tf.int32, [None, ], name="prev_decoder_input{0}".format(i))
+                                           for i in range(self.max_length_decoder)]
+                self.prev_decoder_target = [tf.placeholder(tf.int32, [None, ], name="prev_decoder_target{0}".format(i))
+                                            for i in range(self.max_length_decoder)]
+                self.prev_decoder_weights = [tf.placeholder(tf.float32, shape=[None,], name="prev__decoder_weight{0}".format(i))
+                                             for i in range(self.max_length_decoder)]
 
-            self.next_decoder_input = [tf.placeholder(tf.int32, [None, ], name="next_decoder_input{0}".format(i))
-                                       for i in range(self.max_length_decoder)]
-            self.next_decoder_target = [tf.placeholder(tf.int32, [None, ], name="next_decoder_target{0}".format(i))
-                                        for i in range(self.max_length_decoder)]
-            self.next_decoder_weights = [tf.placeholder(tf.float32, shape=[None,], name="next__decoder_weight{0}".format(i))
-                                         for i in range(self.max_length_decoder)]
+                self.next_decoder_input = [tf.placeholder(tf.int32, [None, ], name="next_decoder_input{0}".format(i))
+                                           for i in range(self.max_length_decoder)]
+                self.next_decoder_target = [tf.placeholder(tf.int32, [None, ], name="next_decoder_target{0}".format(i))
+                                            for i in range(self.max_length_decoder)]
+                self.next_decoder_weights = [tf.placeholder(tf.float32, shape=[None,], name="next__decoder_weight{0}".format(i))
+                                             for i in range(self.max_length_decoder)]
 
     def _create_decoder(self, scope_name, encoder_state, decoder_input):
         with tf.variable_scope(scope_name):
@@ -133,60 +135,62 @@ class SkipthoughtModel:
         self._logger.info("Embeddings done")
 
         self.encoder_state = self._create_encoder(embedded, cudnn=False)
+        self._logger.info("Encoder done")
 
-        prev_decoder_outputs, prev_decoder_predict_logits, prev_decoder_output_proj = \
-            self._create_decoder("prev_decoder", self.encoder_state, self.prev_decoder_input)
-        self._logger.info("Prev decoder done")
+        if not self.only_encoder:
+            prev_decoder_outputs, prev_decoder_predict_logits, prev_decoder_output_proj = \
+                self._create_decoder("prev_decoder", self.encoder_state, self.prev_decoder_input)
+            self._logger.info("Prev decoder done")
 
-        next_decoder_outputs, next_decoder_predict_logits, next_decoder_output_proj = \
-            self._create_decoder("next_decoder", self.encoder_state, self.next_decoder_input)
-        self._logger.info("Next decoder done")
+            next_decoder_outputs, next_decoder_predict_logits, next_decoder_output_proj = \
+                self._create_decoder("next_decoder", self.encoder_state, self.next_decoder_input)
+            self._logger.info("Next decoder done")
 
-        self.prev_decoder_outputs = prev_decoder_outputs
-        self.prev_decoder_predict_logits = prev_decoder_predict_logits
-        self.prev_decoder_predict = [tf.argmax(logit, 1) for logit in self.prev_decoder_predict_logits]
+            self.prev_decoder_outputs = prev_decoder_outputs
+            self.prev_decoder_predict_logits = prev_decoder_predict_logits
+            self.prev_decoder_predict = [tf.argmax(logit, 1) for logit in self.prev_decoder_predict_logits]
 
-        self.next_decoder_outputs = next_decoder_outputs
-        self.next_decoder_predict_logits = next_decoder_predict_logits
-        self.next_decoder_predict = [tf.argmax(logit, 1) for logit in self.next_decoder_predict_logits]
+            self.next_decoder_outputs = next_decoder_outputs
+            self.next_decoder_predict_logits = next_decoder_predict_logits
+            self.next_decoder_predict = [tf.argmax(logit, 1) for logit in self.next_decoder_predict_logits]
 
-        def get_sampled_loss(w, b):
-            w_t = tf.transpose(w)
+            def get_sampled_loss(w, b):
+                w_t = tf.transpose(w)
 
-            def sampled_loss(inputs, labels):
-                labels = tf.reshape(labels, [-1, 1])
-                # We need to compute the sampled_softmax_loss using 32bit floats to
-                # avoid numerical instabilities.
-                local_w_t = tf.cast(w_t, tf.float32)
-                local_b = tf.cast(b, tf.float32)
-                local_inputs = tf.cast(inputs, tf.float32)
-                # return tf.nn.sampled_softmax_loss(local_w_t, local_b, local_inputs, labels,
-                return tf.nn.sampled_softmax_loss(local_w_t, local_b, labels, local_inputs,
-                                                  self.num_samples, self.max_vocab_size)
-            return sampled_loss
+                def sampled_loss(inputs, labels):
+                    labels = tf.reshape(labels, [-1, 1])
+                    # We need to compute the sampled_softmax_loss using 32bit floats to
+                    # avoid numerical instabilities.
+                    local_w_t = tf.cast(w_t, tf.float32)
+                    local_b = tf.cast(b, tf.float32)
+                    local_inputs = tf.cast(inputs, tf.float32)
+                    # return tf.nn.sampled_softmax_loss(local_w_t, local_b, local_inputs, labels,
+                    return tf.nn.sampled_softmax_loss(local_w_t, local_b, labels, local_inputs,
+                                                      self.num_samples, self.max_vocab_size)
+                return sampled_loss
 
-        prev_sampled_loss = get_sampled_loss(*prev_decoder_output_proj)
-        next_sampled_loss = get_sampled_loss(*next_decoder_output_proj)
-        loss_prev = tf.contrib.legacy_seq2seq.sequence_loss(self.prev_decoder_target,
-                                                prev_decoder_outputs,
-                                                self.prev_decoder_weights,
-                                                softmax_loss_function=prev_sampled_loss)
-        loss_next = tf.contrib.legacy_seq2seq.sequence_loss(self.next_decoder_target,
-                                                next_decoder_outputs,
-                                                self.next_decoder_weights,
-                                                softmax_loss_function=next_sampled_loss)
-        self.loss = loss_prev + loss_next
+            prev_sampled_loss = get_sampled_loss(*prev_decoder_output_proj)
+            next_sampled_loss = get_sampled_loss(*next_decoder_output_proj)
+            loss_prev = tf.contrib.legacy_seq2seq.sequence_loss(self.prev_decoder_target,
+                                                    prev_decoder_outputs,
+                                                    self.prev_decoder_weights,
+                                                    softmax_loss_function=prev_sampled_loss)
+            loss_next = tf.contrib.legacy_seq2seq.sequence_loss(self.next_decoder_target,
+                                                    next_decoder_outputs,
+                                                    self.next_decoder_weights,
+                                                    softmax_loss_function=next_sampled_loss)
+            self.loss = loss_prev + loss_next
 
-        global_step = tf.Variable(0, trainable=False)
-        learning_rate = tf.train.exponential_decay(self.lr, global_step, self.decay_steps,
-                                                   self.decay_rate, staircase=True)
+            global_step = tf.Variable(0, trainable=False)
+            learning_rate = tf.train.exponential_decay(self.lr, global_step, self.decay_steps,
+                                                       self.decay_rate, staircase=True)
 
-        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-        tvars = tf.trainable_variables()
-        grads = tf.gradients(self.loss, tvars)
-        clipped_grads, _ = tf.clip_by_global_norm(grads, self.grad_clip)
-        self.train_op = optimizer.apply_gradients(zip(clipped_grads, tvars), global_step=global_step)
-        self._logger.info("Loss and optimizer done")
+            optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+            tvars = tf.trainable_variables()
+            grads = tf.gradients(self.loss, tvars)
+            clipped_grads, _ = tf.clip_by_global_norm(grads, self.grad_clip)
+            self.train_op = optimizer.apply_gradients(zip(clipped_grads, tvars), global_step=global_step)
+            self._logger.info("Loss and optimizer done")
 
     def _fill_feed_dict_train(self, enc_inp,
                               prev_inp, prev_targ,
@@ -237,6 +241,19 @@ class SkipthoughtModel:
         """
         feed_dict = self._fill_feed_dict_train(enc_inp, prev_inp, prev_targ, next_inp, next_targ)
         return self.train_op, self.loss, feed_dict
+
+    def encode_step(self, enc_inp):
+        """Returns train_op, loss and feed_dict for performing sess.run(...) on them.
+
+        Args:
+            enc_inp (data_utils.Batch): Encoder input with a shape [batch_size, batch_length].
+                Batch length can vary from batch to batch.
+        Returns:
+            (self.encoder_state, feed_dict)
+        """
+        max_len = self.max_length_decoder
+        feed_dict = {self.encoder_input: enc_inp.data, self.encoder_seq_len: enc_inp.seq_lengths}
+        return self.encoder_state, feed_dict
 
     def encode(self, curr):
         feed_dict = self._fill_feed_dict_predict(curr)
